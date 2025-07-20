@@ -18,8 +18,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # MongoDB setup
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = "ebbinghaus_bot"
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[DB_NAME]
 
@@ -32,10 +30,6 @@ revisions_col = db["revisions"]
 REVISION_INTERVALS = [0, 1, 3, 7, 15, 30]
 
 # Telegram bot setup
-API_ID = int(os.getenv("API_ID", 0))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
 app = Client(
     "ebbinghaus_bot",
     api_id=API_ID,
