@@ -142,7 +142,7 @@ async def start_command(client: Client, message: types.Message):
         "/stats - View your progress\n"
     )
     
-    await message.reply_text(welcome_text, parse_mode="markdown")
+    await message.reply_text(welcome_text, disable_web_page_preview=True)
 
 @app.on_message(filters.command("add"))
 async def add_topic(client: Client, message: types.Message):
@@ -153,8 +153,7 @@ async def add_topic(client: Client, message: types.Message):
     if len(args) < 4:
         await message.reply_text(
             "Please provide topic name and subject.\n"
-            "Example: `/add Biology Human Digestive System Notes about enzymes and processes`",
-            parse_mode="markdown"
+            "Example: `/add Biology Human Digestive System Notes about enzymes and processes`"
         )
         return
     
@@ -181,10 +180,10 @@ async def add_topic(client: Client, message: types.Message):
         f"- After 7 days\n"
         f"- After 15 days\n"
         f"- After 30 days\n\n"
-        f"Use `/due` to see when your next revision is."
+        f"Use /due to see when your next revision is."
     )
     
-    await message.reply_text(reply_text, parse_mode="markdown")
+    await message.reply_text(reply_text)
 
 @app.on_message(filters.command("due"))
 async def show_due_revisions(client: Client, message: types.Message):
@@ -210,7 +209,7 @@ async def show_due_revisions(client: Client, message: types.Message):
             f"Mark as done with: `/done {str(rev['_id'])[:8]}`\n"
         )
     
-    await message.reply_text("\n".join(response), parse_mode="markdown")
+    await message.reply_text("\n".join(response))
 
 @app.on_message(filters.command("done"))
 async def mark_revision_done(client: Client, message: types.Message):
@@ -222,8 +221,7 @@ async def mark_revision_done(client: Client, message: types.Message):
         await message.reply_text(
             "Please specify revision ID to mark as done.\n"
             "Example: `/done 5f8d3a2b`\n\n"
-            "Use `/due` to see your pending revisions.",
-            parse_mode="markdown"
+            "Use `/due` to see your pending revisions."
         )
         return
     
@@ -311,7 +309,7 @@ async def list_topics(client: Client, message: types.Message):
             f"{status}\n"
         )
     
-    await message.reply_text("\n".join(response), parse_mode="markdown")
+    await message.reply_text("\n".join(response))
 
 @app.on_message(filters.command("stats"))
 async def show_stats(client: Client, message: types.Message):
@@ -358,7 +356,7 @@ async def show_stats(client: Client, message: types.Message):
         f"Keep up the good work! Use `/due` to check your pending revisions."
     )
     
-    await message.reply_text(stats_text, parse_mode="markdown")
+    await message.reply_text(stats_text)
 
 async def send_daily_reminders():
     """Send daily reminders to users about due revisions"""
@@ -401,8 +399,7 @@ async def send_daily_reminders():
                 
                 await app.send_message(
                     user["user_id"],
-                    "\n".join(message),
-                    parse_mode="markdown"
+                    "\n".join(message)
                 )
                 
             except Exception as e:
@@ -433,15 +430,13 @@ async def user_settings(client: Client, message: types.Message):
                 )
             except ValueError:
                 await message.reply_text(
-                    "Please use HH:MM format (24-hour). Example: `/settings time 09:00`",
-                    parse_mode="markdown"
+                    "Please use HH:MM format (24-hour). Example: `/settings time 09:00`"
                 )
         else:
             await message.reply_text(
                 "Available settings:\n"
                 "`/settings time HH:MM` - Set daily reminder time (UTC)\n\n"
-                "Example: `/settings time 09:00`",
-                parse_mode="markdown"
+                "Example: `/settings time 09:00`"
             )
     else:
         # Show current settings
@@ -452,7 +447,7 @@ async def user_settings(client: Client, message: types.Message):
             f"`/settings time HH:MM`\n\n"
             f"Example: `/settings time 09:00`"
         )
-        await message.reply_text(settings_text, parse_mode="markdown")
+        await message.reply_text(settings_text)
 
 # Start the bot
 if __name__ == "__main__":
