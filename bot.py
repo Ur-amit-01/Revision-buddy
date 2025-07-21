@@ -202,7 +202,7 @@ async def add_topic_start(client: Client, message: Message):
         ])
     )
 
-@app.on_message(filters.text & filters.private & ~filters.command())
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "add", "due", "done", "list", "stats"]))
 async def handle_text_input(client: Client, message: Message):
     """Handle text input based on user state"""
     user = get_user(message.from_user.id)
