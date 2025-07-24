@@ -87,7 +87,7 @@ def schedule_revisions(user_id, topic_name):
 
 # ======================== COMMAND HANDLERS ========================
 
-@app.on_message(filters.command(["start", "help"]))
+@app.on_message(filters.command(["start", "help"]) & filters.private)
 async def start(client, message):
     user = get_user(message.from_user.id)
     toxic_mode = "🟢 ON" if user.get("toxic_mode") else "🔴 OFF"
@@ -110,7 +110,7 @@ Log your study topics and I'll remind you to revise them based on the Ebbinghaus
         ])
     )
 
-@app.on_message(filters.command("studied"))
+@app.on_message(filters.command("studied") & filters.private)
 async def log_study(client, message):
     if len(message.command) < 2:
         return await message.reply("Please specify a topic!\nExample: `/studied Plant Physiology`")
@@ -147,7 +147,7 @@ Next revisions will be due at:
         ])
     )
 
-@app.on_message(filters.command("neetdays"))
+@app.on_message(filters.command("neetdays") & filters.private)
 async def neet_countdown(client, message):
     days_left = (NEET_DATE - datetime.now()).days
     await message.reply_text(
@@ -195,7 +195,7 @@ async def snooze(client, callback):
 
 # ======================== TOXIC MODE ========================
 
-@app.on_message(filters.command("toggletoxic"))
+@app.on_message(filters.command("toggletoxic") & filters.private)
 async def toggle_toxic(client, message):
     user_id = message.from_user.id
     user = get_user(user_id)
