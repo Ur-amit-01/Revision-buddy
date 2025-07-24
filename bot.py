@@ -1,12 +1,12 @@
 import os
-import re
 import asyncio
+import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
-from config import *
+
 # Load environment variables
 load_dotenv()
 
@@ -30,8 +30,8 @@ app = Client(
 )
 
 # Initialize MongoDB client
-mongo_client = AsyncIOMotorClient("MONGO_URI")
-db = mongo_client["Revision-bot"]
+mongo_client = AsyncIOMotorClient(os.getenv("MONGODB_URI"))
+db = mongo_client[os.getenv("DATABASE_NAME")]
 users_collection = db["users"]
 subjects_collection = db["subjects"]
 revisions_collection = db["revisions"]
@@ -223,11 +223,18 @@ async def show_stats(client, message):
         "Keep up the good work! Consistency is key to effective learning."
     )
 
-@app.on_message(filters.command(re.compile(r"^done_([0-9a-fA-F]{24})$")))
-async def mark_as_done(client, message):
-    """Mark a revision as done and schedule the next one."""
+@app.on_message()
+async def handle_done_command(client, message):
+    """Handle the done command using regex pattern matching."""
     user_id = message.from_user.id
-    subject_id = message.command[0].split("_")[1]
+    text = message.text or ""
+    
+    # Check if message matches the done pattern
+    match = re.match(r"^/done_([0-9a-fA-F]{24})$", text)
+    if not match:
+        return
+    
+    subject_id = match.group(1)
     
     # Update revision as completed
     revision = await revisions_collection.find_one({
