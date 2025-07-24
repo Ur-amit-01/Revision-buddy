@@ -13,7 +13,11 @@ from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URI
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -105,6 +109,14 @@ app = Client(
     parse_mode=enums.ParseMode.MARKDOWN,
     sleep_threshold=30
 )
+
+# ======================== STARTUP HANDLER ========================
+
+@app.on_startup()
+async def startup(client):
+    """Initialize background tasks when bot starts"""
+    logger.info("🚀 Bot starting up...")
+    asyncio.create_task(smart_reminder_task())
 
 # ======================== COMMAND HANDLERS ========================
 
@@ -287,26 +299,20 @@ async def smart_reminder_task():
             logger.error(f"Reminder task error: {e}")
             await asyncio.sleep(300)  # Wait 5 min on error
 
-# ======================== BOT STARTUP ========================
+# ======================== SHUTDOWN HANDLER ========================
 
-async def run_bot():
-    """Main bot runner"""
-    await app.start()
-    logger.info("Bot started successfully")
-    
-    # Start background tasks
-    asyncio.create_task(smart_reminder_task())
-    
-    # Keep the bot running
-    await asyncio.Event().wait()
+@app.on_shutdown()
+async def shutdown(client):
+    """Handle bot shutdown gracefully"""
+    logger.info("🛑 Bot shutting down...")
+    try:
+        db_client.close()
+        logger.info("✅ MongoDB connection closed")
+    except Exception as e:
+        logger.error(f"Error closing MongoDB connection: {e}")
+
+# ======================== MAIN ENTRY POINT ========================
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-    finally:
-        app.stop()
-        logger.info("Bot shutdown complete")
+    logger.info("Starting NEET Revision Bot...")
+    app.run()
