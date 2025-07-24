@@ -30,8 +30,8 @@ app = Client(
 )
 
 # Initialize MongoDB client
-mongo_client = AsyncIOMotorClient(os.getenv("MONGODB_URI"))
-db = mongo_client[os.getenv("DATABASE_NAME")]
+mongo_client = AsyncIOMotorClient(os.getenv("MONGO_URI"))
+db = mongo_client["Revision-bot"]
 users_collection = db["users"]
 subjects_collection = db["subjects"]
 revisions_collection = db["revisions"]
