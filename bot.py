@@ -110,13 +110,62 @@ app = Client(
     sleep_threshold=30
 )
 
-# ======================== STARTUP HANDLER ========================
+# ======================== BACKGROUND TASK MANAGEMENT ========================
 
-@app.on_startup()
-async def startup(client):
-    """Initialize background tasks when bot starts"""
-    logger.info("🚀 Bot starting up...")
+async def start_background_tasks():
+    """Start all background tasks"""
+    logger.info("🚀 Starting background tasks...")
     asyncio.create_task(smart_reminder_task())
+
+async def smart_reminder_task():
+    """Enhanced reminder system with rate limiting"""
+    while True:
+        try:
+            now = datetime.now()
+            due_topics = topics.find({
+                "revisions": {"$lte": now},
+                "next_reminder": {"$lt": now}
+            })
+            
+            for topic in due_topics:
+                user = BotUtils.get_user(topic["user_id"])
+                
+                # Build reminder message
+                msg = [
+                    f"📌 **Revision Due:** `{topic['topic']}`",
+                    f"⏳ **Interval:** Day {EBINGHAUS_INTERVALS[len(topic.get('completed_revisions', []))]}",
+                    f"🔥 **Streak:** {user.get('streak', 0)} days"
+                ]
+                
+                if user.get("toxic_mode"):
+                    msg.append(f"\n💀 *{random.choice(TOXIC_MESSAGES)}*")
+                
+                # Send reminder
+                try:
+                    await app.send_message(
+                        topic["user_id"],
+                        "\n".join(msg),
+                        reply_markup=InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton("✔️ Done", callback_data=f"done_{topic['topic']}"),
+                                InlineKeyboardButton("⏸ Snooze", callback_data="snooze_1d")
+                            ]
+                        ])
+                    )
+                    
+                    # Update next reminder time
+                    topics.update_one(
+                        {"_id": topic["_id"]},
+                        {"$set": {"next_reminder": now + timedelta(hours=6)}}
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send reminder to {topic['user_id']}: {e}")
+            
+            await asyncio.sleep(60)  # Check every minute
+            
+        except Exception as e:
+            logger.error(f"Reminder task error: {e}")
+            await asyncio.sleep(300)  # Wait 5 min on error
 
 # ======================== COMMAND HANDLERS ========================
 
@@ -247,72 +296,35 @@ async def mark_done_callback(client, callback):
         logger.error(f"Mark done error: {e}")
         await callback.answer("⚠️ Failed to update. Try again.", show_alert=True)
 
-# ======================== BACKGROUND TASKS ========================
-
-async def smart_reminder_task():
-    """Enhanced reminder system with rate limiting"""
-    while True:
-        try:
-            now = datetime.now()
-            due_topics = topics.find({
-                "revisions": {"$lte": now},
-                "next_reminder": {"$lt": now}
-            })
-            
-            for topic in due_topics:
-                user = BotUtils.get_user(topic["user_id"])
-                
-                # Build reminder message
-                msg = [
-                    f"📌 **Revision Due:** `{topic['topic']}`",
-                    f"⏳ **Interval:** Day {EBINGHAUS_INTERVALS[len(topic.get('completed_revisions', []))]}",
-                    f"🔥 **Streak:** {user.get('streak', 0)} days"
-                ]
-                
-                if user.get("toxic_mode"):
-                    msg.append(f"\n💀 *{random.choice(TOXIC_MESSAGES)}*")
-                
-                # Send reminder
-                try:
-                    await app.send_message(
-                        topic["user_id"],
-                        "\n".join(msg),
-                        reply_markup=InlineKeyboardMarkup([
-                            [
-                                InlineKeyboardButton("✔️ Done", callback_data=f"done_{topic['topic']}"),
-                                InlineKeyboardButton("⏸ Snooze", callback_data="snooze_1d")
-                            ]
-                        ])
-                    )
-                    
-                    # Update next reminder time
-                    topics.update_one(
-                        {"_id": topic["_id"]},
-                        {"$set": {"next_reminder": now + timedelta(hours=6)}}
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send reminder to {topic['user_id']}: {e}")
-            
-            await asyncio.sleep(60)  # Check every minute
-            
-        except Exception as e:
-            logger.error(f"Reminder task error: {e}")
-            await asyncio.sleep(300)  # Wait 5 min on error
-
-# ======================== SHUTDOWN HANDLER ========================
-
-@app.on_shutdown()
-async def shutdown(client):
-    """Handle bot shutdown gracefully"""
-    logger.info("🛑 Bot shutting down...")
-    try:
-        db_client.close()
-        logger.info("✅ MongoDB connection closed")
-    except Exception as e:
-        logger.error(f"Error closing MongoDB connection: {e}")
-
 # ======================== MAIN ENTRY POINT ========================
 
+async def main():
+    """Main async entry point"""
+    await app.start()
+    me = await app.get_me()
+    logger.info(f"Bot started as @{me.username}")
+    
+    # Start background tasks
+    await start_background_tasks()
+    
+    # Keep the bot running
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    logger.info("Starting NEET Revision Bot...")
-    app.run()
+    try:
+        # Create new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run the bot
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+    finally:
+        # Clean shutdown
+        loop.run_until_complete(app.stop())
+        db_client.close()
+        logger.info("✅ Resources cleaned up")
+        loop.close()
