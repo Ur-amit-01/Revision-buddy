@@ -1,7 +1,8 @@
 import os
+import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
@@ -28,10 +29,10 @@ except PyMongoError as e:
     logger.error(f"❌ MongoDB connection failed: {e}")
     raise SystemExit("Database connection failed")
 
-# Constants with type hints
-NEET_DATE: datetime = datetime(2026, 5, 5)
-EBINGHAUS_INTERVALS: List[int] = [1, 3, 7, 15, 30]
-TOXIC_MESSAGES: List[str] = [
+# Constants
+NEET_DATE = datetime(2026, 5, 5)
+EBINGHAUS_INTERVALS = [1, 3, 7, 15, 30]
+TOXIC_MESSAGES = [
     "Your competition just finished 10 revisions. You? Still here?",
     "At this rate, even bacteria evolve faster than your preparation.",
     "Procrastination is the art of keeping up with yesterday."
@@ -58,11 +59,43 @@ class BotUtils:
             return {}
 
     @staticmethod
-    def calculate_revision_dates() -> List[datetime]:
-        """Calculate Ebbinghaus intervals with timezone awareness"""
-        return [datetime.now() + timedelta(days=days) for days in EBINGHAUS_INTERVALS]
+    def update_streak(user_id: int) -> int:
+        """Update user's study streak"""
+        user = BotUtils.get_user(user_id)
+        today = datetime.now().date()
+        
+        if user["last_study"]:
+            last_study = user["last_study"].date()
+            if today == last_study:
+                return user["streak"]
+            elif today == last_study + timedelta(days=1):
+                new_streak = user["streak"] + 1
+            else:
+                new_streak = 1  # Reset streak
+        else:
+            new_streak = 1
+        
+        users.update_one(
+            {"_id": user_id},
+            {"$set": {"streak": new_streak, "last_study": datetime.now()}}
+        )
+        return new_streak
 
-# Initialize Pyrogram client with better config
+    @staticmethod
+    def schedule_revisions(user_id: int, topic_name: str):
+        """Create Ebbinghaus revision schedule"""
+        revision_dates = [datetime.now() + timedelta(days=days) for days in EBINGHAUS_INTERVALS]
+        
+        topics.insert_one({
+            "user_id": user_id,
+            "topic": topic_name,
+            "created_at": datetime.now(),
+            "revisions": revision_dates,
+            "completed_revisions": [],
+            "next_reminder": datetime.now()
+        })
+
+# Initialize Pyrogram client
 app = Client(
     "neet_revision_bot",
     api_id=API_ID,
@@ -73,10 +106,10 @@ app = Client(
     sleep_threshold=30
 )
 
-# ======================== ENHANCED COMMAND HANDLERS ========================
+# ======================== COMMAND HANDLERS ========================
 
 @app.on_message(filters.command(["start", "help"]) & filters.private)
-async def enhanced_start(client, message):
+async def start_command(client, message):
     """Improved start command with better formatting"""
     try:
         user = BotUtils.get_user(message.from_user.id)
@@ -107,7 +140,7 @@ async def enhanced_start(client, message):
         await message.reply_text("⚠️ An error occurred. Please try again.")
 
 @app.on_message(filters.command("studied") & filters.private)
-async def enhanced_log_study(client, message):
+async def log_study_command(client, message):
     """Improved study logging with validation"""
     try:
         if len(message.command) < 2:
@@ -117,8 +150,8 @@ async def enhanced_log_study(client, message):
         user_id = message.from_user.id
         
         # Update user data
-        streak = update_streak(user_id)
-        schedule_revisions(user_id, topic)
+        streak = BotUtils.update_streak(user_id)
+        BotUtils.schedule_revisions(user_id, topic)
         
         # Prepare response
         user = BotUtils.get_user(user_id)
@@ -151,11 +184,38 @@ async def enhanced_log_study(client, message):
         logger.error(f"Study log error: {e}")
         await message.reply_text("⚠️ Failed to log your study. Please try again.")
 
-# ======================== ENHANCED CALLBACK HANDLERS ========================
+@app.on_message(filters.command("neetdays") & filters.private)
+async def neet_countdown_command(client, message):
+    """NEET countdown command"""
+    try:
+        days_left = (NEET_DATE - datetime.now()).days
+        await message.reply_text(
+            f"⏳ **{days_left} days left until NEET {NEET_DATE.year}**\n"
+            f"That's about {days_left//7} weeks or {days_left//30} months remaining!"
+        )
+    except Exception as e:
+        logger.error(f"Countdown error: {e}")
+        await message.reply_text("⚠️ Couldn't calculate NEET countdown")
+
+# ======================== CALLBACK HANDLERS ========================
+
+@app.on_callback_query(filters.regex(r"^log_quick$"))
+async def quick_log_callback(client, callback):
+    """Quick log callback handler"""
+    try:
+        await callback.message.edit_text(
+            "What did you study today? (Reply with topic)",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_log")]
+            ])
+        )
+    except Exception as e:
+        logger.error(f"Quick log callback error: {e}")
+        await callback.answer("⚠️ Failed to process request", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^done_(.+)"))
-async def enhanced_mark_done(client, callback):
-    """Improved revision completion handler"""
+async def mark_done_callback(client, callback):
+    """Mark revision as done callback"""
     try:
         topic = callback.matches[0].group(1)
         user_id = callback.from_user.id
@@ -175,34 +235,7 @@ async def enhanced_mark_done(client, callback):
         logger.error(f"Mark done error: {e}")
         await callback.answer("⚠️ Failed to update. Try again.", show_alert=True)
 
-# ======================== NEW FEATURES ========================
-
-@app.on_message(filters.command("myprogress") & filters.private)
-async def view_progress(client, message):
-    """New feature: Visual progress tracker"""
-    try:
-        user_topics = list(topics.find({"user_id": message.from_user.id}))
-        
-        if not user_topics:
-            return await message.reply("You haven't logged any topics yet!")
-        
-        progress_text = ["📊 **Your Revision Progress**\n"]
-        
-        for topic in user_topics[:10]:  # Limit to 10 topics for readability
-            completed = len(topic.get("completed_revisions", []))
-            total = len(EBINGHAUS_INTERVALS)
-            progress = f"`{topic['topic']}`: {completed}/{total} revisions"
-            
-            # Add progress bar
-            bar = "[" + "■" * completed + "□" * (total - completed) + "]"
-            progress_text.append(f"{progress} {bar}")
-        
-        await message.reply_text("\n".join(progress_text))
-    except Exception as e:
-        logger.error(f"Progress error: {e}")
-        await message.reply_text("⚠️ Couldn't fetch your progress. Try again later.")
-
-# ======================== IMPROVED BACKGROUND TASKS ========================
+# ======================== BACKGROUND TASKS ========================
 
 async def smart_reminder_task():
     """Enhanced reminder system with rate limiting"""
@@ -211,7 +244,7 @@ async def smart_reminder_task():
             now = datetime.now()
             due_topics = topics.find({
                 "revisions": {"$lte": now},
-                "next_reminder": {"$lt": now}  # Prevent spam
+                "next_reminder": {"$lt": now}
             })
             
             for topic in due_topics:
@@ -228,22 +261,25 @@ async def smart_reminder_task():
                     msg.append(f"\n💀 *{random.choice(TOXIC_MESSAGES)}*")
                 
                 # Send reminder
-                await app.send_message(
-                    topic["user_id"],
-                    "\n".join(msg),
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton("✔️ Done", callback_data=f"done_{topic['topic']}"),
-                            InlineKeyboardButton("⏸ Snooze", callback_data="snooze_1d")
-                        ]
-                    ])
-                )
-                
-                # Update next reminder time
-                topics.update_one(
-                    {"_id": topic["_id"]},
-                    {"$set": {"next_reminder": now + timedelta(hours=6)}}
-                )
+                try:
+                    await app.send_message(
+                        topic["user_id"],
+                        "\n".join(msg),
+                        reply_markup=InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton("✔️ Done", callback_data=f"done_{topic['topic']}"),
+                                InlineKeyboardButton("⏸ Snooze", callback_data="snooze_1d")
+                            ]
+                        ])
+                    )
+                    
+                    # Update next reminder time
+                    topics.update_one(
+                        {"_id": topic["_id"]},
+                        {"$set": {"next_reminder": now + timedelta(hours=6)}}
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send reminder to {topic['user_id']}: {e}")
             
             await asyncio.sleep(60)  # Check every minute
             
@@ -251,14 +287,26 @@ async def smart_reminder_task():
             logger.error(f"Reminder task error: {e}")
             await asyncio.sleep(300)  # Wait 5 min on error
 
-# ======================== BOT LIFECYCLE MANAGEMENT ========================
+# ======================== BOT STARTUP ========================
 
-@app.on_startup()
-async def startup_task():
-    """Initialize background tasks"""
-    app.loop.create_task(smart_reminder_task())
-    logger.info("Background tasks initialized")
+async def run_bot():
+    """Main bot runner"""
+    await app.start()
+    logger.info("Bot started successfully")
+    
+    # Start background tasks
+    asyncio.create_task(smart_reminder_task())
+    
+    # Keep the bot running
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting NEET Revision Bot")
-    app.run()
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+    finally:
+        app.stop()
+        logger.info("Bot shutdown complete")
