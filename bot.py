@@ -1,330 +1,299 @@
 import os
 import asyncio
-import logging
 from datetime import datetime, timedelta
-from typing import Dict, List
-from pyrogram import Client, filters, enums
+from dotenv import load_dotenv
+from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo import MongoClient
-from pymongo.errors import PyMongoError
-import random
-from config import API_ID, API_HASH, BOT_TOKEN, MONGO_URI
+from motor.motor_asyncio import AsyncIOMotorClient
+from config import *
+# Load environment variables
+load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# MongoDB setup with error handling
-try:
-    db_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db_client.admin.command('ping')  # Test connection
-    db = db_client.get_database("neet_revision_bot")
-    users = db.users
-    topics = db.topics
-    logger.info("✅ MongoDB connected successfully")
-except PyMongoError as e:
-    logger.error(f"❌ MongoDB connection failed: {e}")
-    raise SystemExit("Database connection failed")
-
-# Constants
-NEET_DATE = datetime(2026, 5, 5)
-EBINGHAUS_INTERVALS = [1, 3, 7, 15, 30]
-TOXIC_MESSAGES = [
-    "Your competition just finished 10 revisions. You? Still here?",
-    "At this rate, even bacteria evolve faster than your preparation.",
-    "Procrastination is the art of keeping up with yesterday."
+# Spaced repetition intervals based on Ebbinghaus forgetting curve (in hours)
+SPACED_REPETITION_INTERVALS = [
+    1,      # First repetition after 1 hour
+    9,      # Second repetition after 9 hours (total 10 hours)
+    24,     # Third repetition after 1 day (total 1 day 10 hours)
+    72,     # Fourth repetition after 3 days (total 4 days 10 hours)
+    168,    # Fifth repetition after 1 week (total 11 days 10 hours)
+    336,    # Sixth repetition after 2 weeks (total 25 days 10 hours)
+    720,    # Seventh repetition after 1 month (total ~55 days)
 ]
-
-class BotUtils:
-    """Utility class for common bot functions"""
-    
-    @staticmethod
-    def get_user(user_id: int) -> Dict:
-        """Get or create user with proper typing"""
-        try:
-            user = users.find_one({"_id": user_id}) or {
-                "_id": user_id,
-                "streak": 0,
-                "last_study": None,
-                "toxic_mode": False,
-                "created_at": datetime.now()
-            }
-            users.update_one({"_id": user_id}, {"$setOnInsert": user}, upsert=True)
-            return user
-        except PyMongoError as e:
-            logger.error(f"User fetch error: {e}")
-            return {}
-
-    @staticmethod
-    def update_streak(user_id: int) -> int:
-        """Update user's study streak"""
-        user = BotUtils.get_user(user_id)
-        today = datetime.now().date()
-        
-        if user["last_study"]:
-            last_study = user["last_study"].date()
-            if today == last_study:
-                return user["streak"]
-            elif today == last_study + timedelta(days=1):
-                new_streak = user["streak"] + 1
-            else:
-                new_streak = 1  # Reset streak
-        else:
-            new_streak = 1
-        
-        users.update_one(
-            {"_id": user_id},
-            {"$set": {"streak": new_streak, "last_study": datetime.now()}}
-        )
-        return new_streak
-
-    @staticmethod
-    def schedule_revisions(user_id: int, topic_name: str):
-        """Create Ebbinghaus revision schedule"""
-        revision_dates = [datetime.now() + timedelta(days=days) for days in EBINGHAUS_INTERVALS]
-        
-        topics.insert_one({
-            "user_id": user_id,
-            "topic": topic_name,
-            "created_at": datetime.now(),
-            "revisions": revision_dates,
-            "completed_revisions": [],
-            "next_reminder": datetime.now()
-        })
 
 # Initialize Pyrogram client
 app = Client(
-    "neet_revision_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workers=4,
-    parse_mode=enums.ParseMode.MARKDOWN,
-    sleep_threshold=30
+    "spaced_repetition_bot",
+    api_id=os.getenv("API_ID"),
+    api_hash=os.getenv("API_HASH"),
+    bot_token=os.getenv("BOT_TOKEN")
 )
 
-# ======================== BACKGROUND TASK MANAGEMENT ========================
+# Initialize MongoDB client
+mongo_client = AsyncIOMotorClient("MONGO_URI")
+db = mongo_client["Revision-bot"]
+users_collection = db["users"]
+subjects_collection = db["subjects"]
+revisions_collection = db["revisions"]
 
-async def start_background_tasks():
-    """Start all background tasks"""
-    logger.info("🚀 Starting background tasks...")
-    asyncio.create_task(smart_reminder_task())
+async def get_next_repetition_time(repetition_count):
+    """Get the next repetition time based on the current repetition count."""
+    if repetition_count >= len(SPACED_REPETITION_INTERVALS):
+        # If we've gone through all intervals, use the last one (monthly)
+        return datetime.now() + timedelta(hours=SPACED_REPETITION_INTERVALS[-1])
+    return datetime.now() + timedelta(hours=SPACED_REPETITION_INTERVALS[repetition_count])
 
-async def smart_reminder_task():
-    """Enhanced reminder system with rate limiting"""
+async def schedule_revision_reminder(user_id, subject_id, repetition_count):
+    """Schedule the next revision reminder."""
+    next_repetition_time = await get_next_repetition_time(repetition_count)
+    
+    await revisions_collection.update_one(
+        {"user_id": user_id, "subject_id": subject_id},
+        {"$set": {
+            "next_repetition": next_repetition_time,
+            "repetition_count": repetition_count + 1,
+            "completed": False
+        }},
+        upsert=True
+    )
+    
+    # Calculate delay in seconds until next reminder
+    delay = (next_repetition_time - datetime.now()).total_seconds()
+    await asyncio.sleep(delay)
+    
+    # Check if the revision was marked as completed before sending reminder
+    revision = await revisions_collection.find_one({
+        "user_id": user_id,
+        "subject_id": subject_id,
+        "completed": False
+    })
+    
+    if revision:
+        subject = await subjects_collection.find_one({"_id": subject_id})
+        if subject:
+            await app.send_message(
+                user_id,
+                f"📚 Time to revise: **{subject['name']}**\n\n"
+                f"🔹 Repetition #{repetition_count + 1}\n"
+                f"🔹 Category: {subject.get('category', 'General')}\n\n"
+                f"Reply with /done_{subject_id} when you've completed this revision.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Mark as Done", callback_data=f"done_{subject_id}")]
+                ])
+            )
+
+async def send_reminders():
+    """Check for pending reminders and send them."""
     while True:
-        try:
-            now = datetime.now()
-            due_topics = topics.find({
-                "revisions": {"$lte": now},
-                "next_reminder": {"$lt": now}
-            })
-            
-            for topic in due_topics:
-                user = BotUtils.get_user(topic["user_id"])
-                
-                # Build reminder message
-                msg = [
-                    f"📌 **Revision Due:** `{topic['topic']}`",
-                    f"⏳ **Interval:** Day {EBINGHAUS_INTERVALS[len(topic.get('completed_revisions', []))]}",
-                    f"🔥 **Streak:** {user.get('streak', 0)} days"
-                ]
-                
-                if user.get("toxic_mode"):
-                    msg.append(f"\n💀 *{random.choice(TOXIC_MESSAGES)}*")
-                
-                # Send reminder
-                try:
-                    await app.send_message(
-                        topic["user_id"],
-                        "\n".join(msg),
-                        reply_markup=InlineKeyboardMarkup([
-                            [
-                                InlineKeyboardButton("✔️ Done", callback_data=f"done_{topic['topic']}"),
-                                InlineKeyboardButton("⏸ Snooze", callback_data="snooze_1d")
-                            ]
-                        ])
-                    )
-                    
-                    # Update next reminder time
-                    topics.update_one(
-                        {"_id": topic["_id"]},
-                        {"$set": {"next_reminder": now + timedelta(hours=6)}}
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send reminder to {topic['user_id']}: {e}")
-            
-            await asyncio.sleep(60)  # Check every minute
-            
-        except Exception as e:
-            logger.error(f"Reminder task error: {e}")
-            await asyncio.sleep(300)  # Wait 5 min on error
-
-# ======================== COMMAND HANDLERS ========================
-
-@app.on_message(filters.command(["start", "help"]) & filters.private)
-async def start_command(client, message):
-    """Improved start command with better formatting"""
-    try:
-        user = BotUtils.get_user(message.from_user.id)
+        now = datetime.now()
+        pending_reminders = revisions_collection.find({
+            "next_repetition": {"$lte": now},
+            "completed": False
+        })
         
-        text = f"""
-📚 **NEET Revision Bot**  
-*Optimize your study using spaced repetition*
-
-🔥 **Current Streak:** `{user.get('streak', 0)}` days  
-💀 **Toxic Mode:** `{"ON" if user.get("toxic_mode") else "OFF"}`  
-
-**Available Commands:**  
-▸ /studied `<topic>` - Log new study material  
-▸ /myprogress - View revision calendar  
-▸ /neetdays - Countdown to NEET {NEET_DATE.year}  
-▸ /toggletoxic - Toggle savage motivation  
-        """
+        async for reminder in pending_reminders:
+            subject = await subjects_collection.find_one({"_id": reminder["subject_id"]})
+            if subject:
+                await app.send_message(
+                    reminder["user_id"],
+                    f"📚 Time to revise: **{subject['name']}**\n\n"
+                    f"🔹 Repetition #{reminder['repetition_count'] + 1}\n"
+                    f"🔹 Category: {subject.get('category', 'General')}\n\n"
+                    f"Reply with /done_{subject['_id']} when you've completed this revision.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("Mark as Done", callback_data=f"done_{subject['_id']}")]
+                    ])
+                )
         
+        await asyncio.sleep(60)  # Check every minute
+
+@app.on_message(filters.command(["start", "help"]))
+async def start(client, message):
+    """Send a welcome message when the command /start or /help is issued."""
+    user_id = message.from_user.id
+    
+    # Register user if not already registered
+    await users_collection.update_one(
+        {"_id": user_id},
+        {"$set": {"username": message.from_user.username, "first_name": message.from_user.first_name}},
+        upsert=True
+    )
+    
+    await message.reply_text(
+        "📖 **Spaced Repetition Bot**\n\n"
+        "This bot helps you remember what you learn by reminding you to revise "
+        "based on the Ebbinghaus forgetting curve.\n\n"
+        "**Commands:**\n"
+        "/add - Add a new subject to revise\n"
+        "/list - List all your subjects\n"
+        "/stats - View your revision statistics\n\n"
+        "The bot will automatically remind you when it's time to revise each subject."
+    )
+
+@app.on_message(filters.command("add"))
+async def add_subject(client, message):
+    """Add a new subject to revise."""
+    user_id = message.from_user.id
+    subject_name = " ".join(message.command[1:])
+    
+    if not subject_name:
+        await message.reply_text("Please provide a subject name. Example: /add Mathematics")
+        return
+    
+    # Add subject to database
+    result = await subjects_collection.insert_one({
+        "user_id": user_id,
+        "name": subject_name,
+        "created_at": datetime.now(),
+        "category": "General"  # Default category
+    })
+    
+    # Schedule first revision
+    await schedule_revision_reminder(user_id, result.inserted_id, 0)
+    
+    await message.reply_text(
+        f"✅ Subject **{subject_name}** added successfully!\n\n"
+        f"I'll remind you to revise it based on the spaced repetition schedule."
+    )
+
+@app.on_message(filters.command("list"))
+async def list_subjects(client, message):
+    """List all subjects for the user."""
+    user_id = message.from_user.id
+    subjects = subjects_collection.find({"user_id": user_id}).sort("name", 1)
+    
+    subject_list = []
+    async for subject in subjects:
+        # Get next revision time if available
+        revision = await revisions_collection.find_one({
+            "user_id": user_id,
+            "subject_id": subject["_id"]
+        })
+        
+        if revision:
+            next_rev = revision.get("next_repetition", "Not scheduled")
+            if isinstance(next_rev, datetime):
+                next_rev = next_rev.strftime("%Y-%m-%d %H:%M")
+            rep_count = revision.get("repetition_count", 0)
+        else:
+            next_rev = "Not scheduled"
+            rep_count = 0
+        
+        subject_list.append(
+            f"🔹 **{subject['name']}**\n"
+            f"   - Category: {subject.get('category', 'General')}\n"
+            f"   - Repetitions: {rep_count}\n"
+            f"   - Next revision: {next_rev}\n"
+            f"   - /done_{subject['_id']} /delete_{subject['_id']}\n"
+        )
+    
+    if subject_list:
         await message.reply_text(
-            text.strip(),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📝 Quick Log", callback_data="log_quick")],
-                [InlineKeyboardButton("📊 View Progress", callback_data="view_progress")]
-            ])
+            "📚 **Your Subjects:**\n\n" + "\n".join(subject_list)
         )
-    except Exception as e:
-        logger.error(f"Start command error: {e}")
-        await message.reply_text("⚠️ An error occurred. Please try again.")
+    else:
+        await message.reply_text("You haven't added any subjects yet. Use /add to get started.")
 
-@app.on_message(filters.command("studied") & filters.private)
-async def log_study_command(client, message):
-    """Improved study logging with validation"""
-    try:
-        if len(message.command) < 2:
-            return await message.reply("Please specify a topic!\nExample: `/studied Plant Physiology`")
-        
-        topic = " ".join(message.command[1:])
-        user_id = message.from_user.id
-        
-        # Update user data
-        streak = BotUtils.update_streak(user_id)
-        BotUtils.schedule_revisions(user_id, topic)
-        
-        # Prepare response
-        user = BotUtils.get_user(user_id)
-        revision_dates = "\n".join(
-            f"▸ {days} day(s) - {(datetime.now() + timedelta(days=days)).strftime('%b %d')}"
-            for days in EBINGHAUS_INTERVALS[:3]
-        )
-        
-        text = f"""
-✅ **Topic Logged:** `{topic}`  
-🗓 **Revision Schedule:**  
-{revision_dates}  
+@app.on_message(filters.command("stats"))
+async def show_stats(client, message):
+    """Show revision statistics for the user."""
+    user_id = message.from_user.id
+    
+    # Count total subjects
+    total_subjects = await subjects_collection.count_documents({"user_id": user_id})
+    
+    # Count completed revisions
+    completed_revisions = await revisions_collection.count_documents({
+        "user_id": user_id,
+        "completed": True
+    })
+    
+    # Count pending revisions
+    pending_revisions = await revisions_collection.count_documents({
+        "user_id": user_id,
+        "completed": False,
+        "next_repetition": {"$lte": datetime.now()}
+    })
+    
+    await message.reply_text(
+        "📊 **Your Revision Statistics:**\n\n"
+        f"🔹 Total subjects: {total_subjects}\n"
+        f"🔹 Completed revisions: {completed_revisions}\n"
+        f"🔹 Pending revisions: {pending_revisions}\n\n"
+        "Keep up the good work! Consistency is key to effective learning."
+    )
 
-🔥 **Current Streak:** `{streak}` days  
-        """
-        
-        if user.get("toxic_mode") and streak < 3:
-            text += f"\n\n💀 *{random.choice(TOXIC_MESSAGES)}*"
-        
+@app.on_message(filters.command(re.compile(r"^done_([0-9a-fA-F]{24})$")))
+async def mark_as_done(client, message):
+    """Mark a revision as done and schedule the next one."""
+    user_id = message.from_user.id
+    subject_id = message.command[0].split("_")[1]
+    
+    # Update revision as completed
+    revision = await revisions_collection.find_one({
+        "user_id": user_id,
+        "subject_id": subject_id
+    })
+    
+    if not revision:
+        await message.reply_text("Subject not found or revision not scheduled.")
+        return
+    
+    await revisions_collection.update_one(
+        {"_id": revision["_id"]},
+        {"$set": {"completed": True}}
+    )
+    
+    # Schedule next revision
+    await schedule_revision_reminder(user_id, subject_id, revision["repetition_count"])
+    
+    subject = await subjects_collection.find_one({"_id": subject_id})
+    if subject:
         await message.reply_text(
-            text.strip(),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✔️ Mark Done", callback_data=f"done_{topic}"),
-                    InlineKeyboardButton("⏸ Snooze", callback_data="snooze_1d")
-                ]
-            ])
+            f"✅ Great job revising **{subject['name']}**!\n\n"
+            f"I'll remind you again at the next scheduled time."
         )
-    except Exception as e:
-        logger.error(f"Study log error: {e}")
-        await message.reply_text("⚠️ Failed to log your study. Please try again.")
 
-@app.on_message(filters.command("neetdays") & filters.private)
-async def neet_countdown_command(client, message):
-    """NEET countdown command"""
-    try:
-        days_left = (NEET_DATE - datetime.now()).days
-        await message.reply_text(
-            f"⏳ **{days_left} days left until NEET {NEET_DATE.year}**\n"
-            f"That's about {days_left//7} weeks or {days_left//30} months remaining!"
+@app.on_callback_query(filters.regex(r"^done_([0-9a-fA-F]{24})$"))
+async def mark_as_done_callback(client, callback_query):
+    """Handle the 'Mark as Done' button click."""
+    user_id = callback_query.from_user.id
+    subject_id = callback_query.data.split("_")[1]
+    
+    # Update revision as completed
+    revision = await revisions_collection.find_one({
+        "user_id": user_id,
+        "subject_id": subject_id
+    })
+    
+    if not revision:
+        await callback_query.answer("Subject not found or revision not scheduled.")
+        return
+    
+    await revisions_collection.update_one(
+        {"_id": revision["_id"]},
+        {"$set": {"completed": True}}
+    )
+    
+    # Schedule next revision
+    await schedule_revision_reminder(user_id, subject_id, revision["repetition_count"])
+    
+    subject = await subjects_collection.find_one({"_id": subject_id})
+    if subject:
+        await callback_query.answer()
+        await callback_query.message.edit_text(
+            f"✅ Great job revising **{subject['name']}**!\n\n"
+            f"I'll remind you again at the next scheduled time."
         )
-    except Exception as e:
-        logger.error(f"Countdown error: {e}")
-        await message.reply_text("⚠️ Couldn't calculate NEET countdown")
-
-# ======================== CALLBACK HANDLERS ========================
-
-@app.on_callback_query(filters.regex(r"^log_quick$"))
-async def quick_log_callback(client, callback):
-    """Quick log callback handler"""
-    try:
-        await callback.message.edit_text(
-            "What did you study today? (Reply with topic)",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_log")]
-            ])
-        )
-    except Exception as e:
-        logger.error(f"Quick log callback error: {e}")
-        await callback.answer("⚠️ Failed to process request", show_alert=True)
-
-@app.on_callback_query(filters.regex(r"^done_(.+)"))
-async def mark_done_callback(client, callback):
-    """Mark revision as done callback"""
-    try:
-        topic = callback.matches[0].group(1)
-        user_id = callback.from_user.id
-        
-        topics.update_one(
-            {"user_id": user_id, "topic": topic},
-            {"$push": {"completed_revisions": datetime.now()}}
-        )
-        
-        await callback.answer("✅ Revision completed!")
-        await callback.message.edit_text(
-            f"🎉 **Revision Marked Complete**\n`{topic}`\n\n"
-            "I'll remind you for the next interval!",
-            reply_markup=None
-        )
-    except Exception as e:
-        logger.error(f"Mark done error: {e}")
-        await callback.answer("⚠️ Failed to update. Try again.", show_alert=True)
-
-# ======================== MAIN ENTRY POINT ========================
 
 async def main():
-    """Main async entry point"""
+    """Start the bot and the reminder scheduler."""
     await app.start()
-    me = await app.get_me()
-    logger.info(f"Bot started as @{me.username}")
+    print("Bot started!")
     
-    # Start background tasks
-    await start_background_tasks()
+    # Start the reminder scheduler in the background
+    asyncio.create_task(send_reminders())
     
-    # Keep the bot running
-    await asyncio.Event().wait()
+    await asyncio.Event().wait()  # Run forever
 
 if __name__ == "__main__":
-    try:
-        # Create new event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Run the bot
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user")
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
-    finally:
-        # Clean shutdown
-        loop.run_until_complete(app.stop())
-        db_client.close()
-        logger.info("✅ Resources cleaned up")
-        loop.close()
+    asyncio.run(main())
